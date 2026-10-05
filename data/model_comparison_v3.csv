@@ -1,0 +1,4 @@
+model,MAE,RMSE,R2,MAE_improvement_vs_global_pct
+Global mean,7.199550,11.292904,-0.000758,0.000000
+Origin-hour historical mean,6.221523,10.301800,0.167194,13.584548
+H2O AutoML enhanced,5.844531,10.075499,0.203381,18.820881
