@@ -1,6 +1,16 @@
 {
   "model_id": "GLM_1_AutoML_2_20261002_33511",
   "h2o_version": "3.46.0.11",
+  "training_period": "2008-01 to 2008-09",
+  "validation_period": "2008-10",
+  "test_period": "2008-11 to 2008-12",
+  "sample_rows": {
+    "train": 450000,
+    "validation": 140000,
+    "test": 180000
+  },
+  "feature_schema_version": "3",
+  "relative_density_warning_threshold": 4.0,
   "global_train_mean": 16.476598298327726,
   "feature_columns": [
     "Month",

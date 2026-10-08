@@ -76,6 +76,31 @@ flight_id,scheduled_local,carrier,origin,dest,distance,departure_density_30m
 
 `scheduled_local` có dạng `YYYY-MM-DD HH:MM` theo giờ địa phương của sân bay đi. `departure_density_30m` là số chuyến dự kiến trong cùng khung 30 phút và phải do nguồn dữ liệu cung cấp. Ứng dụng **không giả lập** chuyến bay trực tiếp. Mô hình học từ năm 2008 nên dữ liệu hiện nay có thể lệch phân phối; cần kiểm định lại trước khi dùng vận hành thực tế.
 
+## Tải CSV và đánh giá hàng loạt
+
+Trong dashboard, mở tab **Tải CSV & đánh giá**, chọn CSV UTF-8 rồi bấm **Chạy dự đoán hàng loạt**. Các cột bắt buộc:
+
+```text
+flight_id,scheduled_local,carrier,origin,dest,distance,departure_density_30m
+```
+
+Có thể thêm `TaxiOut` (phút) để tính MAE, RMSE và bias trên các dòng có giá trị thực tế. Nếu không có cột này, ứng dụng chỉ dự đoán, không tự tạo nhãn. `scheduled_local` là giờ địa phương sân bay đi (`YYYY-MM-DD HH:MM`); `distance` tính bằng mile. `departure_density_30m` phải được tính từ lịch bay đầy đủ cùng sân bay và cửa sổ 30 phút. Tệp tối đa 10 MB và 2.000 dòng mỗi lần để tránh vượt RAM của Streamlit/H2O; dữ liệu lớn hơn nên xử lý bằng Spark. Kết quả có thể tải về CSV. Việc tải CSV **không huấn luyện lại** mô hình.
+
 ## Hạn chế mô hình
 
 R² chỉ khoảng 0,20. MAE với chuyến có TaxiOut trên 60 phút là 58,83 phút, nên mô hình không đáng tin cho sự cố tắc nghẽn hiếm. Chưa có thời tiết, trạng thái đường băng, hàng đợi hay dữ liệu ATC. Xem `MODEL_EVALUATION.md`.
+
+## Các bằng chứng cần xuất khi chạy lại Kaggle
+
+Phiên bản source hiện tại tạo thêm các artifact sau để báo cáo có thể tái lập:
+
+- `test_predictions_v3.csv` và `test_predictions_v3.parquet`: dự đoán, residual và absolute error của từng chuyến test.
+- `error_by_hour_v3.csv`, `error_by_carrier_v3.csv`, `error_by_density_band_v3.csv` và `error_by_route_v3.csv`.
+- `model_confidence_v3.json`: bootstrap MAE theo ngày và tỷ lệ sai số trong 5, 10, 15 phút.
+- `h2o_leaderboard_v3.csv` và `glm_coefficients_v3.csv`.
+- `sampling_manifest_v3.json` và `sampling_distribution_v3.csv`.
+- `training_run_v3.json`: phiên bản môi trường, cấu hình AutoML và thời gian huấn luyện.
+
+Chạy `kaggle_recovery_cells.py` để huấn luyện và `kaggle_steps_12_13.py` để xuất bằng chứng đánh giá. Hai script dùng `evaluation.py` làm nguồn logic chung, tránh mỗi bảng sai số sử dụng một công thức khác nhau.
+
+Spark job cũng ghi `data_quality_<year>` dưới output ở định dạng JSON, gồm số dòng sau từng bước lọc và thời gian chạy. Thêm `--skip-quality-report` chỉ khi không muốn phát sinh các phép đếm Spark bổ sung.

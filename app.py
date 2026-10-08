@@ -1,10 +1,13 @@
 from pathlib import Path
+import hashlib
+import json
 import os
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from batch_analysis import evaluation, parse_upload, predict_batch
 from h2o_predictor import H2OTaxiOutPredictor, deployment_is_ready
 from dashboard_data import training_hourly_profile
 from live_feed import (
@@ -21,8 +24,24 @@ DATA_DIR = ROOT / "data"
 MODEL_DIR = ROOT / "taxiout_deployment_v3"
 
 st.set_page_config(page_title="Airport Taxi Time", page_icon="✈️", layout="wide")
-st.title("✈️ Phân tích hiệu năng sân bay & Taxi Time")
-st.caption("Apache Spark · H2O AutoML · Streamlit/Plotly")
+st.markdown("""
+<style>
+  :root { --airport-blue: #1e40af; --airport-amber: #b45309; }
+  .block-container { max-width: 1420px; padding-top: 2rem; padding-bottom: 3rem; }
+  h1, h2, h3 { letter-spacing: -.025em; }
+  [data-testid="stMetric"] { background: #f8fafc; border: 1px solid #dbeafe;
+      border-radius: 12px; padding: 16px; min-height: 110px; }
+  [data-testid="stMetricLabel"] { color: #334155; }
+  [data-testid="stTabs"] button { min-height: 48px; }
+  .airport-hero { border-left: 5px solid var(--airport-blue); background: #f8fafc;
+      padding: 18px 22px; border-radius: 10px; margin-bottom: 22px; }
+  .airport-hero p { margin: 0; color: #334155; }
+  @media (max-width: 700px) { .block-container { padding: 1rem; }
+      .airport-hero { padding: 14px; } }
+</style>
+""", unsafe_allow_html=True)
+st.title("Phân tích vận hành sân bay & TaxiOut")
+st.markdown("<div class='airport-hero'><p>Dữ liệu chuyến bay 2008 · Spark xử lý · H2O AutoML dự đoán · Plotly trực quan hóa</p></div>", unsafe_allow_html=True)
 
 
 @st.cache_data
@@ -33,6 +52,15 @@ def read_csv(name: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+@st.cache_data
+def read_json(name: str) -> dict:
+    path = DATA_DIR / name
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as file:
+        return json.load(file)
+
+
 comparison = read_csv("model_comparison_v3.csv")
 airports = read_csv("airport_summary_2008.csv")
 hourly = read_csv("hourly_congestion_top20.csv")
@@ -40,6 +68,9 @@ locations = read_csv("airport_locations.csv")
 error_airport = read_csv("error_by_airport_v3.csv")
 error_hour = read_csv("error_by_hour_v3.csv")
 error_band = read_csv("error_by_taxi_band_v3.csv")
+leaderboard = read_csv("h2o_leaderboard_v3.csv")
+coefficients = read_csv("glm_coefficients_v3.csv")
+confidence = read_json("model_confidence_v3.json")
 
 
 @st.cache_resource
@@ -69,9 +100,9 @@ with st.sidebar:
     st.write(f"{'✅' if model_ready else '⚠️'} Tệp mô hình H2O")
     st.caption("Tệp CSV thật được đọc từ thư mục data. Số liệu mẫu chỉ dùng khi chưa có tệp tương ứng.")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Hiệu năng mô hình", "Tắc nghẽn sân bay", "Dự đoán TaxiOut", "Phân tích sai số",
-    "Luồng chuyến bay"
+    "Luồng chuyến bay", "Tải CSV & đánh giá"
 ])
 
 with tab1:
@@ -101,6 +132,22 @@ with tab1:
     st.plotly_chart(px.bar(melted, x="model", y="minutes", color="metric", barmode="group",
                            title="MAE và RMSE — thấp hơn là tốt hơn"), width="stretch")
     st.dataframe(comparison, width="stretch", hide_index=True)
+    if confidence:
+        st.write(
+            "**Độ bất định trên tập kiểm tra:** "
+            f"MAE bootstrap 95% CI = {confidence['ci95_lower']:.2f}–"
+            f"{confidence['ci95_upper']:.2f} phút; "
+            f"sai số ≤5 phút: {confidence.get('within_5_minutes_pct', 0):.1f}%, "
+            f"≤10 phút: {confidence.get('within_10_minutes_pct', 0):.1f}%."
+        )
+    else:
+        st.caption("Chưa có model_confidence_v3.json; chạy BƯỚC 13 để tạo khoảng tin cậy bootstrap.")
+    if not leaderboard.empty:
+        with st.expander("Leaderboard H2O AutoML"):
+            st.dataframe(leaderboard, width="stretch", hide_index=True)
+    if not coefficients.empty:
+        with st.expander("Hệ số mô hình GLM"):
+            st.dataframe(coefficients.head(30), width="stretch", hide_index=True)
     with st.expander("Cách đọc các chỉ số", expanded=True):
         st.markdown(
             """
@@ -192,6 +239,13 @@ with tab3:
         if model_ready:
             try:
                 predictor = load_h2o_predictor(str(MODEL_DIR))
+                for warning in predictor.assess_input(
+                    carrier=carrier,
+                    origin=origin,
+                    dest=dest,
+                    departure_density=density,
+                ):
+                    st.warning(f"Cảnh báo phạm vi mô hình: {warning}.")
                 prediction = predictor.predict(
                     month=month, day=day, day_of_week=day_of_week,
                     dep_hour=dep_hour, dep_minute=dep_minute, carrier=carrier,
@@ -301,3 +355,78 @@ with tab5:
         st.caption(f"Nguồn chuyến bay: {source} · Nguồn dự đoán: H2O AutoML — {predictor.model_id}")
 
     show_live_feed()
+
+with tab6:
+    st.subheader("Dự đoán hàng loạt từ CSV")
+    st.write(
+        "Tải lịch bay lên để dự đoán TaxiOut. Nếu tệp có thêm cột `TaxiOut` thực tế, "
+        "hệ thống sẽ tính sai số trên các dòng có nhãn. Tệp tải lên không dùng để huấn luyện lại."
+    )
+    with st.expander("Định dạng CSV cần chuẩn bị", expanded=True):
+        st.code(
+            "flight_id,scheduled_local,carrier,origin,dest,distance,departure_density_30m,TaxiOut\n"
+            "DL123,2008-11-15 08:30,DL,ATL,LGA,761,30,22",
+            language="text",
+        )
+        st.caption(
+            "TaxiOut là cột tùy chọn. scheduled_local dùng giờ địa phương của sân bay đi; "
+            "distance tính bằng mile. Mật độ 30 phút phải đến từ lịch bay đầy đủ, không phải "
+            "số dòng ngẫu nhiên trong tệp mẫu. Giới hạn: 10 MB và 2.000 chuyến/lần."
+        )
+    uploaded = st.file_uploader("Chọn tệp CSV UTF-8", type="csv", key="batch_upload")
+    if uploaded is not None:
+        upload_bytes = uploaded.getvalue()
+        upload_digest = hashlib.sha256(upload_bytes).hexdigest()
+        try:
+            batch_input = parse_upload(upload_bytes)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Chuyến hợp lệ", f"{len(batch_input):,}")
+            c2.metric("Sân bay đi", batch_input["origin"].nunique())
+            c3.metric("Có TaxiOut thực tế", int(batch_input.get("TaxiOut", pd.Series(dtype=float)).notna().sum()))
+            st.dataframe(batch_input.head(20), width="stretch", hide_index=True)
+            if not model_ready:
+                st.error("Chưa có gói mô hình H2O local; không thể dự đoán hàng loạt.")
+            elif st.button("Chạy dự đoán hàng loạt", type="primary"):
+                try:
+                    with st.spinner(f"H2O đang dự đoán {len(batch_input):,} chuyến..."):
+                        predictor = load_h2o_predictor(str(MODEL_DIR))
+                        result = predict_batch(predictor, batch_input)
+                    st.session_state["batch_result"] = result
+                    st.session_state["batch_digest"] = upload_digest
+                    st.session_state["batch_model_id"] = predictor.model_id
+                except Exception as exc:
+                    st.error(f"Không hoàn tất dự đoán H2O: {exc}")
+                    st.info("Kiểm tra các giá trị ngày giờ, mã sân bay và trạng thái H2O rồi thử lại.")
+
+    result = st.session_state.get("batch_result")
+    if result is not None and uploaded is not None and st.session_state.get("batch_digest") == upload_digest:
+        st.divider()
+        st.subheader("Kết quả dự đoán")
+        st.caption(f"Mô hình: H2O AutoML — {st.session_state['batch_model_id']} · Không huấn luyện lại")
+        scores = evaluation(result)
+        if scores:
+            a, b, c, d = st.columns(4)
+            a.metric("Dòng có nhãn", f"{scores['count']:,}")
+            b.metric("MAE", f"{scores['mae']:.2f} phút")
+            c.metric("RMSE", f"{scores['rmse']:.2f} phút")
+            d.metric("Bias (thực tế − dự đoán)", f"{scores['bias']:+.2f} phút")
+            st.warning("Các chỉ số này đo trên tệp vừa tải, không thay thế kết quả kiểm tra độc lập của mô hình.")
+        else:
+            st.info("Không có TaxiOut thực tế nên chỉ hiển thị dự đoán, chưa thể đánh giá độ chính xác.")
+        grouped = result.groupby("origin", as_index=False).agg(
+            flights=("flight_id", "count"), avg_prediction=("predicted_taxi_out_minutes", "mean")
+        ).sort_values("avg_prediction", ascending=False)
+        left, right = st.columns([3, 2])
+        with left:
+            st.plotly_chart(px.bar(grouped.head(15), x="origin", y="avg_prediction",
+                hover_data=["flights"], title="TaxiOut dự đoán trung bình theo sân bay đi",
+                labels={"origin": "Sân bay đi", "avg_prediction": "Phút"},
+                color_discrete_sequence=["#1e40af"]), width="stretch")
+        with right:
+            st.dataframe(grouped.head(15).round(2), width="stretch", hide_index=True)
+        st.dataframe(result, width="stretch", hide_index=True)
+        st.download_button("Tải kết quả CSV", result.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="taxiout_batch_predictions.csv", mime="text/csv")
